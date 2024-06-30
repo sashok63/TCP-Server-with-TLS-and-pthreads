@@ -2,19 +2,22 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
+#include <errno.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
 #include <pthread.h>
 
-#define PORT 8080
 #define BUFFER_SIZE 1024
 #define MAX_CLIENTS 10
 
+int server_socket;
 int client_sockets[MAX_CLIENTS];
 char usernames[MAX_CLIENTS][BUFFER_SIZE];
 pthread_mutex_t clients_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 void *handle_client(void *arg);
+void handle_shutdown(int sig, siginfo_t *info, void *context);
 
 int main(int argc, char *argv[])
 {
@@ -24,7 +27,7 @@ int main(int argc, char *argv[])
         exit(EXIT_FAILURE);
     }
 
-    int server_socket, client_socket;
+    int client_socket;
     struct sockaddr_in server_addr, client_addr;
     socklen_t client_addr_len = sizeof(client_addr);
     pthread_t tid;
@@ -68,6 +71,18 @@ int main(int argc, char *argv[])
 
     printf("Server listening on port %d\n", port_num);
 
+    //Graceful shutdown    (Ctrl + C)
+    struct sigaction sa;
+    sa.sa_sigaction = handle_shutdown;
+    sa.sa_flags = SA_SIGINFO;
+    sigemptyset(&sa.sa_mask);
+    if (sigaction(SIGINT, &sa, NULL) < 0)
+    {
+        perror("sigaction failed");
+        close(server_socket);
+        exit(EXIT_FAILURE);
+    }
+
     while (1)
     {
         if ((client_socket = accept(server_socket, (struct sockaddr *)&client_addr, &client_addr_len)) < 0)
@@ -102,11 +117,11 @@ void *handle_client(void *arg) {
     int client_socket = *((int *)arg);
     char buffer[BUFFER_SIZE];
     int bytes_read;
-    char *greating = "Enter your username: ";
+    char *greeting = "Enter your username: ";
 
     //Registration
     char username[BUFFER_SIZE];
-    write(client_socket, greating, strlen(greating));
+    write(client_socket, greeting, strlen(greeting));
     if ((bytes_read = read(client_socket, username, sizeof(username) - 1)) > 0)
     {
         username[strcspn(username, "\r\n")] = '\0';
@@ -129,7 +144,15 @@ void *handle_client(void *arg) {
     {
         buffer[strcspn(buffer, "\r\n")] = '\0';
 
-        printf("Received from %s(id:%d): %s\n", username, client_socket, buffer);
+        if (strcmp(buffer, "!exit") == 0)
+        {
+            printf("Logged out %s(id:%d)\n",
+                username, client_socket);
+            break;
+        }
+
+        printf("Received from %s(id:%d): %s\n",
+                username, client_socket, buffer);
 
         //Echo the message back to the client
         // write(client_socket, buffer, strlen(buffer));
@@ -142,10 +165,15 @@ void *handle_client(void *arg) {
             {
                 //Construct the message to include username and id
                 char message[BUFFER_SIZE + BUFFER_SIZE + 20];
-                snprintf(message, sizeof(message), "%s(id:%d): %s\n", username, client_socket, buffer);
+                snprintf(message, sizeof(message), "%s(id:%d): %s\n",
+                         username, client_socket, buffer);
                 
                 //Send the message to each connected client
-                write(client_sockets[i], message, strlen(message));
+                if (write(client_sockets[i], message, strlen(message)) < 0)
+                {
+                    fprintf(stderr, "Error sending message to client %d: %s\n",
+                            i, strerror(errno));
+                }
             }
         }
         pthread_mutex_unlock(&clients_mutex);
@@ -166,4 +194,45 @@ void *handle_client(void *arg) {
 
     close(client_socket);
     return NULL;
+}
+
+void handle_shutdown(int sig, siginfo_t *info, void *context)
+{
+    (void)sig;
+    (void)info;
+    (void)context;
+    char *str = "Server is shutting down\n";
+
+    printf("\nShutting down server...\n");
+    pthread_mutex_lock(&clients_mutex);
+    for (int i = 0; i < MAX_CLIENTS; ++i)
+    {
+        if (client_sockets[i] != 0)
+        {
+            if (write(client_sockets[i], str, strlen(str)) < 0)
+            {
+                fprintf(stderr, "Error sending shutdown message to client %d: %s\n",
+                        i, strerror(errno));
+            }
+
+            if (close(client_sockets[i]) < 0)
+            {
+                fprintf(stderr, "Error closing client socket %d: %s\n",
+                        i, strerror(errno));
+            }
+            else
+            {
+                client_sockets[i] = 0;
+            }
+        }
+    }
+    pthread_mutex_unlock(&clients_mutex);
+
+    if (close(server_socket) < 0)
+    {
+        fprintf(stderr, "Error closing server socket: %s\n", strerror(errno));
+    }
+
+    printf("Server shutdown complete.\n");
+    exit(0);
 }
