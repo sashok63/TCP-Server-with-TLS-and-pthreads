@@ -1,5 +1,5 @@
 # TCP-Server-with-TLS-and-pthreads
-* TCP Server with TLS encryption and pthreads implemented in C
+* TCP Server with TLS encryption and pthreads
 
 ## Building 
 ```bash
